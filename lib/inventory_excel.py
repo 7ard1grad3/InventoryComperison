@@ -77,6 +77,8 @@ class InventoryExcel(FileLogic):
                                      f"'{opposite_df['Warehouse']} {opposite_df['Sub Inventory']}'")
 
     def check_non_serial_items(self, compare_df: DataFrame):
+        compare_df = compare_df.astype(str)
+        compare_df[["Quantity"]] = compare_df[["Quantity"]].astype(int)
         df = self.to_data_frame()
         query = df.query('Serial.isnull()', engine='python').groupby(['Warehouse', 'Sub Inventory', 'Part Number'])[
             'Quantity'].sum()
@@ -89,12 +91,12 @@ class InventoryExcel(FileLogic):
             opposite_sheet = PRIMARY_COLUMN if self.sheet_name == SECONDARY_COLUMN else SECONDARY_COLUMN
             conversion_warehouse = conversion_row[opposite_sheet + " Warehouse"]
             conversion_sub_inventory = conversion_row[opposite_sheet + " Sub Inventory"]
-            compare_df.columns = [column.replace(" ", "_") for column in compare_df.columns]
+            # compare_df.columns = [column.replace(" ", "_") for column in compare_df.columns]
             opposite_df = compare_df.query(
-                f'Part_Number == "{quantity_based_row[0][2]}" and '
-                f'Warehouse == "{conversion_warehouse}" and '
-                f'Sub_Inventory == "{conversion_sub_inventory}"').groupby(
-                ['Warehouse', 'Sub_Inventory', 'Part_Number'])[
+                f'`Part Number` == "{str(quantity_based_row[0][2])}" and '
+                f'`Warehouse` == "{conversion_warehouse}" and '
+                f'`Sub Inventory` == "{str(conversion_sub_inventory)}"').groupby(
+                ['Warehouse', 'Sub Inventory', 'Part Number'])[
                 'Quantity'].sum().reset_index()
 
             if opposite_df.empty:
