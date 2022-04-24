@@ -27,6 +27,10 @@ class WarehouseConversionExcel(FileLogic):
 
     def find_conversion(self, sheet_name: str, warehouse: str, sub_warehouse: str):
         df = self.to_data_frame()
-        return df.loc[
-            (df[sheet_name + ' Warehouse'] == warehouse) &
-            (df[sheet_name + ' Sub Inventory'] == sub_warehouse)].iloc[0]
+        try:
+            location = df.loc[
+                (df[sheet_name + ' Warehouse'] == warehouse) &
+                (df[sheet_name + ' Sub Inventory'] == sub_warehouse)].iloc[0]
+        except:
+            return None
+        return location

@@ -31,7 +31,7 @@ class InventoryExcel(FileLogic):
 
                 # Check that warehouse listed
                 conversion_row = self.warehouse_conversion.find_conversion(self.sheet_name, row[3], row[4])
-                if conversion_row.empty:
+                if conversion_row is None or conversion_row.empty:
                     self.add_error(
                         f"Missing conversion for warehouse {row[3]} {row[4]}. failed at row {id_n}",
                         'error')
