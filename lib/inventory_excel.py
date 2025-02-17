@@ -1,5 +1,5 @@
+import pandas as pd
 from pandas import DataFrame
-
 from config import SORT_BY_COLUMN, PRIMARY_COLUMN, SECONDARY_COLUMN
 from lib.filelogic import FileLogic
 from lib.warehouse_conversion_excel import WarehouseConversionExcel
@@ -93,8 +93,6 @@ class InventoryExcel(FileLogic):
                                      f" but found in warehouse: "
                                      f"'{opposite_df['Warehouse']} {opposite_df['Sub Inventory']}'")
 
-
-
     def check_non_serial_items(self, compare_df: DataFrame):
         console = Console()
 
@@ -105,17 +103,17 @@ class InventoryExcel(FileLogic):
         compare_df = compare_df.astype(str)
         df = df.astype(str)
 
-        # Convert part numbers to lowercase for consistent comparison
-        compare_df['Part Number'] = compare_df['Part Number'].str.strip().str.lower()
-        df['Part Number'] = df['Part Number'].str.strip().str.lower()
+        # Preserve original formatting but create a case-insensitive matching column
+        compare_df['Part Number (Lower)'] = compare_df['Part Number'].str.strip().str.lower()
+        df['Part Number (Lower)'] = df['Part Number'].str.strip().str.lower()
 
-        # Convert quantity column to integer
-        compare_df["Quantity"] = compare_df["Quantity"].astype(int)
-        df["Quantity"] = df["Quantity"].astype(int)
+        # Convert quantity column to integer (handling possible NaN or non-numeric values)
+        compare_df["Quantity"] = pd.to_numeric(compare_df["Quantity"], errors='coerce').fillna(0).astype(int)
+        df["Quantity"] = pd.to_numeric(df["Quantity"], errors='coerce').fillna(0).astype(int)
 
-        # Group non-serial items by warehouse, sub-inventory, and part number
+        # Group non-serial items by warehouse, sub-inventory, and case-insensitive part number
         query = df.query('Serial.isnull() or Serial == ""', engine='python') \
-            .groupby(['Warehouse', 'Sub Inventory', 'Part Number'])['Quantity'].sum()
+            .groupby(['Warehouse', 'Sub Inventory', 'Part Number (Lower)'])['Quantity'].sum()
 
         for quantity_based_row in query.items():
             # Search for warehouse conversion
@@ -131,31 +129,35 @@ class InventoryExcel(FileLogic):
             conversion_warehouse = conversion_row[opposite_sheet + " Warehouse"]
             conversion_sub_inventory = conversion_row[opposite_sheet + " Sub Inventory"]
 
-            # Search for the part number in the opposite sheet
+            # Search for the part number in the opposite sheet (case-insensitive)
             opposite_df = compare_df.query(
-                f'`Part Number` == "{str(quantity_based_row[0][2]).lower()}" and '
+                f'`Part Number (Lower)` == "{quantity_based_row[0][2]}" and '
                 f'`Warehouse` == "{conversion_warehouse}" and '
-                f'`Sub Inventory` == "{str(conversion_sub_inventory)}"') \
-                .groupby(['Warehouse', 'Sub Inventory', 'Part Number'])['Quantity'].sum().reset_index()
+                f'`Sub Inventory` == "{conversion_sub_inventory}"'
+            ).groupby(['Warehouse', 'Sub Inventory', 'Part Number (Lower)'])['Quantity'].sum().reset_index()
 
             if opposite_df.empty:
+                # ✅ Preserve original part number in the results, even though comparison was case-insensitive
+                original_part_number = \
+                df.loc[df['Part Number (Lower)'] == quantity_based_row[0][2], 'Part Number'].values[0]
 
                 self.add_invalid([
-                    quantity_based_row[0][2], None, quantity_based_row[1],
+                    original_part_number, None, quantity_based_row[1],
                     quantity_based_row[0][0], quantity_based_row[0][1]
-                ], f"Missing item {quantity_based_row[0][2]} in {opposite_sheet} "
+                ], f"Missing item {original_part_number} in {opposite_sheet} "
                    f"worksheet warehouse: '{conversion_warehouse} {conversion_sub_inventory}'")
             else:
-                if opposite_df['Quantity'][0] != quantity_based_row[1]:
+                # Preserve original part number format in reporting
+                original_part_number = \
+                df.loc[df['Part Number (Lower)'] == quantity_based_row[0][2], 'Part Number'].values[0]
 
+                if opposite_df['Quantity'][0] != quantity_based_row[1]:
                     self.add_invalid([
-                        quantity_based_row[0][2], None, quantity_based_row[1],
+                        original_part_number, None, quantity_based_row[1],
                         quantity_based_row[0][0], quantity_based_row[0][1]
-                    ], f"Quantity mismatch in item {quantity_based_row[0][2]} in {opposite_sheet} "
+                    ], f"Quantity mismatch in item {original_part_number} in {opposite_sheet} "
                        f"worksheet warehouse: '{conversion_warehouse} {conversion_sub_inventory}' "
                        f"expected {quantity_based_row[1]} actual {opposite_df['Quantity'][0]}")
-
-
 
     def ignore_serials_for_non_serialized_items(self, non_serialized_items):
         """
@@ -175,8 +177,8 @@ class InventoryExcel(FileLogic):
 
 
         # 🔍 Check if special characters are causing mismatches
-        df["Part Number"] = df["Part Number"].apply(lambda x: re.sub(r'\W+', '', x.strip().upper()))
-        non_serialized_items = {re.sub(r'\W+', '', item.strip().upper()) for item in non_serialized_items}
+        df["Part Number"] = df["Part Number"].apply(lambda x: x.strip().upper())  # Preserve dashes
+        non_serialized_items = {item.strip().upper() for item in non_serialized_items}
 
         # Identify unmatched part numbers
         unmatched_items = set(df["Part Number"]) - non_serialized_items
