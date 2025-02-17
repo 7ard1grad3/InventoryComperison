@@ -3,7 +3,8 @@ from pandas import DataFrame
 from config import SORT_BY_COLUMN, PRIMARY_COLUMN, SECONDARY_COLUMN
 from lib.filelogic import FileLogic
 from lib.warehouse_conversion_excel import WarehouseConversionExcel
-
+from rich.console import Console
+import re
 
 class InventoryExcel(FileLogic):
     def __init__(self, file: str, sheet_name: str, warehouse_conversion: WarehouseConversionExcel):
@@ -43,75 +44,153 @@ class InventoryExcel(FileLogic):
             return False
 
     def check_serial_items(self, compare_df: DataFrame):
-        df = self.to_data_frame()
+        console = Console()
+
+        # ✅ Ensure we use the updated DataFrame (self.df), NOT reload it from the file
+        df = self.df if hasattr(self, "df") else self.to_data_frame()
+
+        # Replace NaN with empty string, then convert to uppercase for case-insensitive comparison
+        df['Serial'] = df['Serial'].fillna("").astype(str).str.upper()
+        compare_df['Serial'] = compare_df['Serial'].fillna("").astype(str).str.upper()
+
+
         for _, serial_row in df.loc[df['Serial'].notnull()].iterrows():
-            # Search for conversion
-            conversion_row = self.warehouse_conversion.find_conversion(self.sheet_name,
-                                                                       serial_row['Warehouse'],
-                                                                       serial_row['Sub Inventory'])
-            # Search for serial in opposite DF and conversion warehouse
+            serial_value = serial_row['Serial']
+
+            # ✅ Skip empty serials (in case clearing failed)
+            if serial_value.strip() == "":
+                continue  # Ignore blank serials
+
+            # Check warehouse conversion
+            conversion_row = self.warehouse_conversion.find_conversion(
+                self.sheet_name, serial_row['Warehouse'], serial_row['Sub Inventory']
+            )
+
             opposite_sheet = PRIMARY_COLUMN if self.sheet_name == SECONDARY_COLUMN else SECONDARY_COLUMN
             conversion_warehouse = conversion_row[opposite_sheet + " Warehouse"]
             conversion_sub_inventory = conversion_row[opposite_sheet + " Sub Inventory"]
+
             opposite_df = compare_df.loc[
                 (compare_df['Warehouse'] == conversion_warehouse) &
                 (compare_df['Sub Inventory'] == conversion_sub_inventory) &
-                (compare_df['Serial'] == serial_row['Serial'])
+                (compare_df['Serial'] == serial_value)
                 ]
+
             if opposite_df.empty:
-                # Check if exists in another warehouse
-                opposite_df = compare_df.loc[
-                    (compare_df['Serial'] == serial_row['Serial'])
-                ]
+                opposite_df = compare_df.loc[compare_df['Serial'] == serial_value]
                 if opposite_df.empty:
+
                     self.add_invalid(serial_row.values.tolist(),
-                                     f"Missing serial {serial_row['Serial']} in {opposite_sheet} "
+                                     f"Missing serial {serial_value} in {opposite_sheet} "
                                      f"worksheet warehouse: '{conversion_warehouse} "
                                      f"{conversion_sub_inventory}'")
                 else:
                     opposite_df = opposite_df.iloc[0]
+
                     self.add_invalid(serial_row.values.tolist(),
-                                     f"Mismatch serial {serial_row['Serial']} in {opposite_sheet} "
+                                     f"Mismatch serial {serial_value} in {opposite_sheet} "
                                      f"worksheet expected to be in '{conversion_warehouse} {conversion_sub_inventory}'"
                                      f" but found in warehouse: "
                                      f"'{opposite_df['Warehouse']} {opposite_df['Sub Inventory']}'")
 
+
+
     def check_non_serial_items(self, compare_df: DataFrame):
+        console = Console()
+
+        # ✅ Ensure we use the updated DataFrame (self.df), NOT reload it from the file
+        df = self.df if hasattr(self, "df") else self.to_data_frame()
+
+        # Convert all to string to avoid type mismatches
         compare_df = compare_df.astype(str)
-        compare_df['Part Number'] = compare_df['Part Number'].apply(lambda x: x.lower())
-        compare_df[["Quantity"]] = compare_df[["Quantity"]].astype(int)
-        df = self.to_data_frame()
-        query = df.query('Serial.isnull()', engine='python').groupby(['Warehouse', 'Sub Inventory', 'Part Number'])[
-            'Quantity'].sum()
+        df = df.astype(str)
+
+        # Convert part numbers to lowercase for consistent comparison
+        compare_df['Part Number'] = compare_df['Part Number'].str.strip().str.lower()
+        df['Part Number'] = df['Part Number'].str.strip().str.lower()
+
+        # Convert quantity column to integer
+        compare_df["Quantity"] = compare_df["Quantity"].astype(int)
+        df["Quantity"] = df["Quantity"].astype(int)
+
+        # Group non-serial items by warehouse, sub-inventory, and part number
+        query = df.query('Serial.isnull() or Serial == ""', engine='python') \
+            .groupby(['Warehouse', 'Sub Inventory', 'Part Number'])['Quantity'].sum()
+
         for quantity_based_row in query.items():
-            # Search for conversion
-            conversion_row = self.warehouse_conversion.find_conversion(self.sheet_name,
-                                                                       quantity_based_row[0][0],
-                                                                       quantity_based_row[0][1])
-            # Search for serial in opposite DF and conversion warehouse
+            # Search for warehouse conversion
+            conversion_row = self.warehouse_conversion.find_conversion(
+                self.sheet_name, quantity_based_row[0][0], quantity_based_row[0][1])
+
+            # If no conversion found, skip
+            if conversion_row is None:
+                continue
+
+            # Identify opposite warehouse details
             opposite_sheet = PRIMARY_COLUMN if self.sheet_name == SECONDARY_COLUMN else SECONDARY_COLUMN
             conversion_warehouse = conversion_row[opposite_sheet + " Warehouse"]
             conversion_sub_inventory = conversion_row[opposite_sheet + " Sub Inventory"]
-            # compare_df.columns = [column.replace(" ", "_") for column in compare_df.columns]
+
+            # Search for the part number in the opposite sheet
             opposite_df = compare_df.query(
                 f'`Part Number` == "{str(quantity_based_row[0][2]).lower()}" and '
                 f'`Warehouse` == "{conversion_warehouse}" and '
-                f'`Sub Inventory` == "{str(conversion_sub_inventory)}"').groupby(
-                ['Warehouse', 'Sub Inventory', 'Part Number'])[
-                'Quantity'].sum().reset_index()
+                f'`Sub Inventory` == "{str(conversion_sub_inventory)}"') \
+                .groupby(['Warehouse', 'Sub Inventory', 'Part Number'])['Quantity'].sum().reset_index()
 
             if opposite_df.empty:
-                self.add_invalid([quantity_based_row[0][2], None, quantity_based_row[1], quantity_based_row[0][0],
-                                  quantity_based_row[0][1]],
-                                 f"Missing item {quantity_based_row[0][2]} in {opposite_sheet} "
-                                 f"worksheet warehouse: '{conversion_warehouse} "
-                                 f"{conversion_sub_inventory}'")
+
+                self.add_invalid([
+                    quantity_based_row[0][2], None, quantity_based_row[1],
+                    quantity_based_row[0][0], quantity_based_row[0][1]
+                ], f"Missing item {quantity_based_row[0][2]} in {opposite_sheet} "
+                   f"worksheet warehouse: '{conversion_warehouse} {conversion_sub_inventory}'")
             else:
-                # Item exists but quantity may not match
                 if opposite_df['Quantity'][0] != quantity_based_row[1]:
-                    self.add_invalid([quantity_based_row[0][2], None, quantity_based_row[1], quantity_based_row[0][0],
-                                      quantity_based_row[0][1]],
-                                     f"Quantity mismatch in item {quantity_based_row[0][2]} in {opposite_sheet} "
-                                     f"worksheet warehouse: '{conversion_warehouse} "
-                                     f"{conversion_sub_inventory}' expected {quantity_based_row[1]} actual "
-                                     f"{opposite_df['Quantity'][0]}")
+
+                    self.add_invalid([
+                        quantity_based_row[0][2], None, quantity_based_row[1],
+                        quantity_based_row[0][0], quantity_based_row[0][1]
+                    ], f"Quantity mismatch in item {quantity_based_row[0][2]} in {opposite_sheet} "
+                       f"worksheet warehouse: '{conversion_warehouse} {conversion_sub_inventory}' "
+                       f"expected {quantity_based_row[1]} actual {opposite_df['Quantity'][0]}")
+
+
+
+    def ignore_serials_for_non_serialized_items(self, non_serialized_items):
+        """
+        Temporarily removes serials for items that are marked as non-serialized.
+        This is done in-memory without modifying the actual Excel file.
+        """
+        console = Console()  # Initialize Console for printing
+
+        # Load the DataFrame
+        df = self.to_data_frame()
+
+        # Ensure "Part Number" is formatted consistently
+        df["Part Number"] = df["Part Number"].astype(str).str.strip().str.upper()
+        non_serialized_items = {str(item).strip().upper() for item in non_serialized_items}
+
+        # 🔍 Debugging: Print cleaned part numbers
+
+
+        # 🔍 Check if special characters are causing mismatches
+        df["Part Number"] = df["Part Number"].apply(lambda x: re.sub(r'\W+', '', x.strip().upper()))
+        non_serialized_items = {re.sub(r'\W+', '', item.strip().upper()) for item in non_serialized_items}
+
+        # Identify unmatched part numbers
+        unmatched_items = set(df["Part Number"]) - non_serialized_items
+
+
+        # Create mask for filtering non-serialized items
+        mask = df["Part Number"].isin(non_serialized_items)
+
+
+        # Clear serials
+        df.loc[mask, "Serial"] = ""
+
+
+        # Update self.df to ensure the modified DataFrame is used in future processing
+        self.df = df.copy()
+
+        console.print(f"✅ Serials ignored for non-serialized items in {self.sheet_name} worksheet.")
